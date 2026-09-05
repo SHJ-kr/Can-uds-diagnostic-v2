@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "release/**", "hotfix/**"]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # 1) 코드 스타일 검사 (clang-format)
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format 설치
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: 포맷 검사 (src/, include/ 안의 .c/.h 전부)
+        run: |
+          FILES=$(find src include -name "*.c" -o -name "*.h" 2>/dev/null)
+          if [ -z "$FILES" ]; then
+            echo "검사할 .c/.h 파일이 없습니다."
+            exit 0
+          fi
+          clang-format --dry-run --Werror $FILES
+
+  # 2) 커밋 메시지 컨벤션 검사
+  commit-convention:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 커밋 히스토리 전체를 받아야 범위 비교 가능
+      - name: 이번 push로 새로 추가된 커밋들만 검사
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+          fi
+          bash scripts/check_commit_message.sh "$RANGE"
+
+  # 3) MISRA-C 정적분석 (cppcheck)
+  misra-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cppcheck 설치
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: MISRA-C 검사 (dump 생성 후 addon 실행)
+        run: |
+          FILES=$(find src -name "*.c" 2>/dev/null)
+          if [ -z "$FILES" ]; then
+            echo "검사할 .c 파일이 없습니다."
+            exit 0
+          fi
+          cppcheck --dump -I include $FILES
+          MISRA_ADDON=$(find / -iname "misra.py" 2>/dev/null | head -1)
+          : > misra_report.json
+          for f in $FILES; do
+            python3 "$MISRA_ADDON" --cli "$f.dump" >> misra_report.json 2>/dev/null || true
+          done
+          if [ -s misra_report.json ]; then
+            echo "❌ MISRA-C 위반 발견:"
+            cat misra_report.json
+            exit 1
+          else
+            echo "✅ MISRA-C 위반 없음"
+          fi
+
+  # 4) 동적 검증 (Google Test 빌드 및 실행)
+  dynamic-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CMake 구성
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: 빌드
+        run: cmake --build build
+      - name: 테스트 실행
+        run: ctest --test-dir build --output-on-failure

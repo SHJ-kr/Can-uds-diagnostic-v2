@@ -1,0 +1,5 @@
+#ifndef ISR_PRIORITY_H
+#define ISR_PRIORITY_H
+#define ISR_PRIORITY_CAN_TX 1
+#define ISR_PRIORITY_CAN_RX 2
+#endif
