@@ -29,14 +29,12 @@ info g_ecuInfo = {
     "MyProjectSupplier"  // Supplier
 };
 
-
-
 // [신규] 전역 변수 초기화 (기존 C 코드의 하드코딩된 값)
 SensorThresholds_t g_sensorThresholds = {
-    0, // ultra_min_mm
+    0,   // ultra_min_mm
     400, // ultra_max_mm
-    0, // tof_min_mm
-    5000  // tof_max_mm
+    0,   // tof_min_mm
+    5000 // tof_max_mm
 };
 
 McmcanType g_mcmcan;
@@ -158,9 +156,9 @@ static inline void UDS_Dispatch_CompletedPdu(const unsigned char *uds, int len)
             UDS_Handle_2E_0005(uds, len);
         }
         else if (len >= 3 && uds[1] == 0x00 && uds[2] == 0x06)
-                {
-                    UDS_Handle_2E_0006(uds, len);
-                }
+        {
+            UDS_Handle_2E_0006(uds, len);
+        }
         else
         {
             unsigned char neg[8] = {0x03, 0x7F, 0x2E, 0x31, 0, 0, 0, 0}; // R-O-O-R
@@ -228,30 +226,35 @@ void Can_TpRx(const unsigned char *data, int len)
 void DTC_Report(unsigned int code)
 {
     // 1) 기존 항목 찾기
-    for (unsigned int i = 0; i < g_dtcCount; i++) {
-        if (g_dtcList[i].dtcCode == code) {
-            if (g_dtcList[i].detectCnt == 0) {
+    for (unsigned int i = 0; i < g_dtcCount; i++)
+    {
+        if (g_dtcList[i].dtcCode == code)
+        {
+            if (g_dtcList[i].detectCnt == 0)
+            {
                 // 첫 감지 → 보류
                 g_dtcList[i].detectCnt = 1;
-                g_dtcList[i].status    = 0x01; // Pending
-            } else {
+                g_dtcList[i].status = 0x01; // Pending
+            }
+            else
+            {
                 // 두 번째 이상 감지 → 확정
                 g_dtcList[i].detectCnt++;
-                g_dtcList[i].status    = 0x40; // Confirmed
+                g_dtcList[i].status = 0x40; // Confirmed
             }
             return;
         }
     }
 
     // 2) 새 항목 추가 (최초 감지=보류)
-    if (g_dtcCount < MAX_DTC_COUNT) {
-        g_dtcList[g_dtcCount].dtcCode   = code;
+    if (g_dtcCount < MAX_DTC_COUNT)
+    {
+        g_dtcList[g_dtcCount].dtcCode = code;
         g_dtcList[g_dtcCount].detectCnt = 1;
-        g_dtcList[g_dtcCount].status    = 0x01; // Pending
+        g_dtcList[g_dtcCount].status = 0x01; // Pending
         g_dtcCount++;
     }
 }
-
 
 void DTC_Add(unsigned int code, unsigned char status)
 {
@@ -259,11 +262,15 @@ void DTC_Add(unsigned int code, unsigned char status)
     DTC_Report(code);
 
     // 필요 시 호출자가 더 높은 단계(예: 0x40)를 강제로 올려 둘 수 있도록 허용
-    for (unsigned int i = 0; i < g_dtcCount; i++) {
-        if (g_dtcList[i].dtcCode == code) {
-            if (status > g_dtcList[i].status) {
+    for (unsigned int i = 0; i < g_dtcCount; i++)
+    {
+        if (g_dtcList[i].dtcCode == code)
+        {
+            if (status > g_dtcList[i].status)
+            {
                 g_dtcList[i].status = status;
-                if (status == 0x40 && g_dtcList[i].detectCnt < 2) {
+                if (status == 0x40 && g_dtcList[i].detectCnt < 2)
+                {
                     g_dtcList[i].detectCnt = 2; // 일관성 유지
                 }
             }
@@ -391,24 +398,24 @@ void Can_RxIsrHandler(void)
 
         switch (DID)
         {
-        case 0x0001:
-            side_index = 0;
-            break; // Left
-        case 0x0002:
-            side_index = 1;
-            break; // Right
-        case 0x0003:
-            side_index = 2;
-            break; // Rear
-        case 0x0004:
-            side_index = 3;
-            break; // ToF
-        case 0x0005:
-            side_index = 4;
-            break; // ECU_INFO
-        default:
-            Can_SendMsg(0x7e8, (const char *)negCanData, 8);
-            return;
+            case 0x0001:
+                side_index = 0;
+                break; // Left
+            case 0x0002:
+                side_index = 1;
+                break; // Right
+            case 0x0003:
+                side_index = 2;
+                break; // Rear
+            case 0x0004:
+                side_index = 3;
+                break; // ToF
+            case 0x0005:
+                side_index = 4;
+                break; // ECU_INFO
+            default:
+                Can_SendMsg(0x7e8, (const char *)negCanData, 8);
+                return;
         }
 
         /* ----- 초음파 센서 (0~2) ----- */
@@ -477,9 +484,8 @@ void Can_RxIsrHandler(void)
         }
 
         /* ----- 센서 응답 (0x0001~0x0004) ----- */
-        unsigned char posCanData[8] = {
-            0x06, posSid, rxData[2], rxData[3],
-            (senVal >> 8) & 0xFF, senVal & 0xFF, result_char, 0};
+        unsigned char posCanData[8] = {0x06,          posSid,      rxData[2], rxData[3], (senVal >> 8) & 0xFF,
+                                       senVal & 0xFF, result_char, 0};
         Can_SendMsg(0x7e8, (const char *)posCanData, 8);
         return;
     }
@@ -541,36 +547,34 @@ void Can_Init(CAN_BAUDRATES ls_baudrate, CAN_NODE CAN_Node)
     IfxCan_Can_initNodeConfig(&g_mcmcan.canNodeConfig, &g_mcmcan.canModule);
     switch (ls_baudrate)
     {
-    case BD_NOUSE:
-        g_mcmcan.canNodeConfig.busLoopbackEnabled = TRUE;
-        break;
-    case BD_500K:
-        g_mcmcan.canNodeConfig.baudRate.baudrate = 500000;
-        break;
-    case BD_1M:
-        g_mcmcan.canNodeConfig.baudRate.baudrate = 1000000;
-        break;
+        case BD_NOUSE:
+            g_mcmcan.canNodeConfig.busLoopbackEnabled = TRUE;
+            break;
+        case BD_500K:
+            g_mcmcan.canNodeConfig.baudRate.baudrate = 500000;
+            break;
+        case BD_1M:
+            g_mcmcan.canNodeConfig.baudRate.baudrate = 1000000;
+            break;
     }
     g_mcmcan.canNodeConfig.busLoopbackEnabled = FALSE;
 
     if (CAN_Node == CAN_NODE0)
     { /* CAN Node 0 for lite kit */
         g_mcmcan.canNodeConfig.nodeId = IfxCan_NodeId_0;
-        const IfxCan_Can_Pins pins =
-            {
-                &IfxCan_TXD00_P20_8_OUT, IfxPort_OutputMode_pushPull, /* TX Pin for lite kit (can node 0) */
-                &IfxCan_RXD00B_P20_7_IN, IfxPort_InputMode_pullUp,    /* RX Pin for lite kit (can node 0) */
-                IfxPort_PadDriver_cmosAutomotiveSpeed1};
+        const IfxCan_Can_Pins pins = {
+            &IfxCan_TXD00_P20_8_OUT, IfxPort_OutputMode_pushPull, /* TX Pin for lite kit (can node 0) */
+            &IfxCan_RXD00B_P20_7_IN, IfxPort_InputMode_pullUp,    /* RX Pin for lite kit (can node 0) */
+            IfxPort_PadDriver_cmosAutomotiveSpeed1};
         g_mcmcan.canNodeConfig.pins = &pins;
     }
     else if (CAN_Node == CAN_NODE2)
     { /* CAN Node 2 for mikrobus */
         g_mcmcan.canNodeConfig.nodeId = IfxCan_NodeId_2;
-        const IfxCan_Can_Pins pins =
-            {
-                &IfxCan_TXD02_P15_0_OUT, IfxPort_OutputMode_pushPull, /* TX Pin for mikrobus (can node 2) */
-                &IfxCan_RXD02A_P15_1_IN, IfxPort_InputMode_pullUp,    /* RX Pin for mikrobus (can node 2) */
-                IfxPort_PadDriver_cmosAutomotiveSpeed1};
+        const IfxCan_Can_Pins pins = {
+            &IfxCan_TXD02_P15_0_OUT, IfxPort_OutputMode_pushPull, /* TX Pin for mikrobus (can node 2) */
+            &IfxCan_RXD02A_P15_1_IN, IfxPort_InputMode_pullUp,    /* RX Pin for mikrobus (can node 2) */
+            IfxPort_PadDriver_cmosAutomotiveSpeed1};
         g_mcmcan.canNodeConfig.pins = &pins;
     }
 
@@ -654,9 +658,7 @@ int Can_RecvMsg(unsigned int *id, char *rxData, int *len)
     g_mcmcan.rxMsg.readFromRxFifo1 = FALSE;
 
     /* Read the received CAN message */
-    IfxCan_Can_readMessage(&g_mcmcan.canDstNode,
-                           &g_mcmcan.rxMsg,
-                           (uint32 *)&g_mcmcan.rxData);
+    IfxCan_Can_readMessage(&g_mcmcan.canDstNode, &g_mcmcan.rxMsg, (uint32 *)&g_mcmcan.rxData);
 
     *id = g_mcmcan.rxMsg.messageId;
     for (int i = 0; i < 8; i++)

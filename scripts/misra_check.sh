@@ -10,9 +10,27 @@ fi
 
 echo "🔍 pre-commit: MISRA-C 검사 중 (경고만, 커밋은 막지 않음)..."
 
-MISRA_ADDON=$(find / -iname "misra.py" 2>/dev/null | head -1)
+if ! command -v cppcheck >/dev/null 2>&1; then
+    echo "⚠️  cppcheck가 설치되어 있지 않아 MISRA 검사를 건너뜁니다."
+    exit 0
+fi
+
+# misra.py는 보통 cppcheck 설치 경로 바로 아래 addons/에 들어있다.
+# (전체 디스크를 find / 로 훑는 건 느리고 불안정해서 후보 경로만 확인)
+CPPCHECK_DIR=$(dirname "$(command -v cppcheck)")
+MISRA_ADDON=""
+for candidate in \
+    "$CPPCHECK_DIR/addons/misra.py" \
+    "$CPPCHECK_DIR/../share/cppcheck/addons/misra.py" \
+    "/usr/share/cppcheck/addons/misra.py"; do
+    if [ -f "$candidate" ]; then
+        MISRA_ADDON="$candidate"
+        break
+    fi
+done
+
 if [ -z "$MISRA_ADDON" ]; then
-    echo "⚠️  misra.py를 찾지 못해 MISRA 검사를 건너뜁니다."
+    echo "⚠️  misra.py를 찾지 못해 MISRA 검사를 건너뜁니다. (cppcheck 설치에 addons가 포함되어 있는지 확인하세요)"
     exit 0
 fi
 
