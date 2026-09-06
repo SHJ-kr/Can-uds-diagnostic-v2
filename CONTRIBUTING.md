@@ -28,26 +28,36 @@ fix(gui): N_Cr 타임아웃 감지 안 되던 버그 수정
 test: DTC 클리어 로직 단위 테스트 추가
 ```
 
-이 형식을 안 지키면 push 시 CI의 `commit-convention` 잡이 실패합니다.
+이 형식을 안 지키면 push 시 CI의 `commit-convention` 잡이 실패하고, 로컬 커밋 시점에도 아래 pre-commit 훅에서 막힙니다.
 
-## 자동으로 검사되는 것 (push할 때마다)
-1. **clang-format** — `src/`, `include/` 안의 `.c`/`.h` 파일 스타일 검사
-2. **커밋 메시지 컨벤션** — 위 형식 준수 여부
-3. **MISRA-C** — cppcheck의 misra addon으로 `src/` 안의 `.c` 파일 검사
-4. **Google Test 동적 검증** — `test/` 안의 테스트를 CMake로 빌드 후 실행
+## 로컬 개발 환경 셋업 (클론 후 최초 1회)
+이 저장소는 [pre-commit](https://pre-commit.com) 프레임워크로 git hook을 관리합니다. `.githooks` 같은 커밋된 훅 폴더를 쓰지 않으므로, **클론 후 반드시 아래 명령을 한 번 실행**해야 커밋 시점에 검사가 동작합니다.
 
-## 로컬에서 미리 확인하고 싶다면
 ```bash
-# 포맷 확인
-clang-format --dry-run --Werror src/*.c include/*.h
+pip install pre-commit
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+```
 
-# 포맷 자동 수정
-clang-format -i src/*.c include/*.h
+이 명령은 `.git/hooks/pre-commit`, `.git/hooks/commit-msg`를 생성합니다(로컬 전용, git으로 추적되지 않음). clang-format은 pre-commit이 pip으로 미리 빌드된 바이너리를 자동으로 받아오므로 별도로 LLVM을 설치할 필요가 없습니다.
 
-# MISRA 검사
-cppcheck --dump -I include src/*.c
-python3 $(find / -iname misra.py 2>/dev/null | head -1) --cli src/*.c.dump
+## 자동으로 검사되는 것
+| 시점 | 검사 항목 |
+|---|---|
+| **커밋할 때** (로컬, pre-commit 훅) | clang-format (위반 시 자동 수정 후 커밋 중단 → `git diff`로 확인, `git add`, 재커밋) |
+| | MISRA-C (경고만, 커밋은 막지 않음) |
+| | 커밋 메시지 컨벤션 |
+| **push/PR할 때** (CI, `ci.yml`) | clang-format, 커밋 메시지 컨벤션, MISRA-C, Google Test 동적 검증 |
 
-# 테스트
-cmake -S . -B build && cmake --build build && ctest --test-dir build
+로컬 훅과 CI가 같은 컨벤션을 검사하므로, 커밋 시점에 통과했다면 CI에서도 대부분 통과합니다.
+
+## 로컬에서 훅을 수동으로 돌려보고 싶다면
+```bash
+# 스테이지된 파일에 대해 모든 훅 실행 (실제 커밋 없이 미리 확인)
+pre-commit run
+
+# 저장소 전체 파일에 대해 실행
+pre-commit run --all-files
+
+# 특정 훅만 실행
+pre-commit run clang-format
 ```

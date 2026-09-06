@@ -1,0 +1,28 @@
+repos:
+  # clang-format: pip으로 배포되는 사전 빌드 바이너리를 자동 설치해서 사용.
+  # -i가 훅에 내장되어 있어 위반 발견 시 파일을 직접 고친 뒤 커밋을 중단시킨다.
+  # (git diff로 변경 내용을 확인하고 git add 후 다시 커밋)
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v20.1.8
+    hooks:
+      - id: clang-format
+        args: ["-style=file"]
+        files: ^(src/|include/)
+
+  # 커밋 컨벤션 / MISRA 검사 (프로젝트 자체 스크립트)
+  - repo: local
+    hooks:
+      - id: check-commit-message
+        name: Check Commit Message Convention
+        entry: bash scripts/check_commit_msg_hook.sh
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true
+
+      - id: misra-check
+        name: MISRA-C Check (warning only)
+        entry: bash scripts/misra_check.sh
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
