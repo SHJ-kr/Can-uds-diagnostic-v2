@@ -19,6 +19,6 @@ while read -r sha; do
         echo "   형식: <feat|fix|docs|style|refactor|test|chore|perf>(scope 선택): 설명"
         FAILED=1
     fi
-done < <(git rev-list "$RANGE")
+done < <(git rev-list --no-merges "$RANGE")
 
 exit $FAILED
