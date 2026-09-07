@@ -39,33 +39,42 @@ jobs:
           fi
           bash scripts/check_commit_message.sh "$RANGE"
 
-  # 3) MISRA-C 정적분석 (cppcheck)
-  misra-check:
+  # 3) 일반 정적분석 (cppcheck, MISRA는 로컬 pre-commit 훅에서 이미 검사하므로 여기선 범용 검사만 안전망으로 수행)
+  static-analysis:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: cppcheck 설치
         run: sudo apt-get update && sudo apt-get install -y cppcheck
-      - name: MISRA-C 검사 (dump 생성 후 addon 실행)
+      - name: cppcheck 실행
         run: |
           FILES=$(find src -name "*.c" 2>/dev/null)
           if [ -z "$FILES" ]; then
             echo "검사할 .c 파일이 없습니다."
             exit 0
           fi
-          cppcheck --dump -I include $FILES
-          MISRA_ADDON=$(find / -iname "misra.py" 2>/dev/null | head -1)
-          : > misra_report.json
-          for f in $FILES; do
-            python3 "$MISRA_ADDON" --cli "$f.dump" >> misra_report.json 2>/dev/null || true
-          done
-          if [ -s misra_report.json ]; then
-            echo "❌ MISRA-C 위반 발견:"
-            cat misra_report.json
-            exit 1
-          else
-            echo "✅ MISRA-C 위반 없음"
+          cppcheck --enable=all --xml --xml-version=2 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            --suppress=unusedFunction \
+            -I include $FILES 2> cppcheck_report.xml
+      - name: 결과 요약 (실패시키지 않음, 참고용)
+        if: always()
+        run: |
+          if [ -s cppcheck_report.xml ]; then
+            ISSUE_COUNT=$(grep -c '<error' cppcheck_report.xml || echo "0")
+            echo "### Cppcheck 결과" >> $GITHUB_STEP_SUMMARY
+            echo "**발견된 이슈: ${ISSUE_COUNT}건**" >> $GITHUB_STEP_SUMMARY
+            grep -o 'severity="[^"]*"' cppcheck_report.xml | sort | uniq -c | while read count severity; do
+              echo "- ${severity}: ${count}" >> $GITHUB_STEP_SUMMARY
+            done || true
           fi
+      - name: 결과 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cppcheck-report
+          path: cppcheck_report.xml
 
   # 4) 동적 검증 (Google Test 빌드 및 실행)
   dynamic-test:

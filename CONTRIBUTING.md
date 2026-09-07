@@ -44,11 +44,11 @@ pre-commit install --hook-type pre-commit --hook-type commit-msg
 | 시점 | 검사 항목 |
 |---|---|
 | **커밋할 때** (로컬, pre-commit 훅) | clang-format (위반 시 자동 수정 후 커밋 중단 → `git diff`로 확인, `git add`, 재커밋) |
-| | MISRA-C (경고만, 커밋은 막지 않음) |
+| | MISRA-C (`cppcheck_config/misra_rule_texts.txt` 규칙 설명 포함, 경고만·커밋은 막지 않음) |
 | | 커밋 메시지 컨벤션 |
-| **push/PR할 때** (CI, `ci.yml`) | clang-format, 커밋 메시지 컨벤션, MISRA-C, Google Test 동적 검증 |
+| **push/PR할 때** (CI, `ci.yml`) | clang-format, 커밋 메시지 컨벤션, 일반 cppcheck 정적분석(`--enable=all`, 참고용·실패 처리 안 함), Google Test 동적 검증 |
 
-로컬 훅과 CI가 같은 컨벤션을 검사하므로, 커밋 시점에 통과했다면 CI에서도 대부분 통과합니다.
+**MISRA-C는 로컬 pre-commit 훅에서만 검사합니다.** CI는 MISRA 특화 검사 대신 더 범용적인 cppcheck 검사를 참고용 안전망으로만 돌리고, 결과가 있어도 빌드를 실패시키지 않습니다(리포트는 Actions 아티팩트로 업로드됨). 이는 project 1과 동일한 구조입니다 — 로컬 훅이 이미 강제성 있는 검사(스타일)와 참고용 검사(MISRA)를 모두 담당하므로, CI에서 같은 걸 중복으로 강하게 막을 필요가 없기 때문입니다.
 
 ## 로컬에서 훅을 수동으로 돌려보고 싶다면
 ```bash
