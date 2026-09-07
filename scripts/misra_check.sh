@@ -10,34 +10,29 @@ fi
 
 echo "🔍 pre-commit: MISRA-C 검사 중 (경고만, 커밋은 막지 않음)..."
 
-if ! command -v cppcheck >/dev/null 2>&1; then
-    echo "⚠️  cppcheck가 설치되어 있지 않아 MISRA 검사를 건너뜁니다."
+# cppcheck는 pip 패키지(cppcheck-wheel)로 이 훅 전용 가상환경에 자동 설치된다.
+# (.pre-commit-config.yaml의 misra-check 훅: language: python, additional_dependencies: [cppcheck])
+# 그 패키지가 공식으로 제공하는 get_cppcheck_dir()로 실제 설치 위치(바이너리+addons)를 찾는다.
+CPPCHECK_DIR=$(python -c "from cppcheck import get_cppcheck_dir; print(get_cppcheck_dir())" 2>/dev/null)
+
+if [ -z "$CPPCHECK_DIR" ]; then
+    echo "⚠️  cppcheck pip 패키지를 찾지 못해 MISRA 검사를 건너뜁니다."
     exit 0
 fi
 
-# misra.py는 보통 cppcheck 설치 경로 바로 아래 addons/에 들어있다.
-# (전체 디스크를 find / 로 훑는 건 느리고 불안정해서 후보 경로만 확인)
-CPPCHECK_DIR=$(dirname "$(command -v cppcheck)")
-MISRA_ADDON=""
-for candidate in \
-    "$CPPCHECK_DIR/addons/misra.py" \
-    "$CPPCHECK_DIR/../share/cppcheck/addons/misra.py" \
-    "/usr/share/cppcheck/addons/misra.py"; do
-    if [ -f "$candidate" ]; then
-        MISRA_ADDON="$candidate"
-        break
-    fi
-done
+CPPCHECK_BIN="$CPPCHECK_DIR/cppcheck"
+[ -f "$CPPCHECK_BIN.exe" ] && CPPCHECK_BIN="$CPPCHECK_BIN.exe"
+MISRA_ADDON="$CPPCHECK_DIR/addons/misra.py"
 
-if [ -z "$MISRA_ADDON" ]; then
-    echo "⚠️  misra.py를 찾지 못해 MISRA 검사를 건너뜁니다. (cppcheck 설치에 addons가 포함되어 있는지 확인하세요)"
+if [ ! -f "$MISRA_ADDON" ]; then
+    echo "⚠️  misra.py를 찾지 못해 MISRA 검사를 건너뜁니다."
     exit 0
 fi
 
 TMPOUT=$(mktemp)
-cppcheck --dump -I include $STAGED_C >/dev/null 2>&1
+"$CPPCHECK_BIN" --dump -I include $STAGED_C >/dev/null 2>&1
 for f in $STAGED_C; do
-    [ -f "$f.dump" ] && python3 "$MISRA_ADDON" --cli "$f.dump" 2>/dev/null
+    [ -f "$f.dump" ] && python "$MISRA_ADDON" --cli "$f.dump" 2>/dev/null
     rm -f "$f.dump"  # 임시 dump 파일 정리
 done > "$TMPOUT"
 

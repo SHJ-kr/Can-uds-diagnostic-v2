@@ -22,7 +22,8 @@ repos:
       - id: misra-check
         name: MISRA-C Check (warning only)
         entry: bash scripts/misra_check.sh
-        language: system
+        language: python
+        additional_dependencies: ["cppcheck"]
         stages: [pre-commit]
         pass_filenames: false
         always_run: true
