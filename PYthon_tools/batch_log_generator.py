@@ -25,6 +25,7 @@ import can
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from virtual_ecu import VirtualECU, CAN_BITRATE, frame_tx_time, precise_wait  # noqa: E402
+from can_bus_arbiter import ArbitratedBus, start_background_traffic  # noqa: E402
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 CSV_PATH = LOGS_DIR / "real_diagnostic_log.csv"
@@ -73,17 +74,24 @@ class UdsClient:
 
     N_CR_TIMEOUT = 1.0
 
-    def __init__(self, bus, req_id=REQ_ID, res_id=RES_ID, bitrate=CAN_BITRATE):
+    def __init__(self, bus, req_id=REQ_ID, res_id=RES_ID, bitrate=CAN_BITRATE, arbiter=None):
         self.bus = bus
         self.req_id = req_id
         self.res_id = res_id
         self.bitrate = bitrate
+        # arbiter가 있으면 배경 트래픽 노드들과 실제 ID 우선순위로 경쟁해서 버스를
+        # 점유한다. 없으면(기본) 예전처럼 즉시 보낸다.
+        self.arbiter = arbiter
 
     def _send(self, data8):
-        """virtual_ecu.VirtualECU._send_raw와 동일하게, 500kbps 기준 프레임 전송시간을
-        직접 반영한 뒤(virtual 버스는 이 시간을 흉내내지 않으므로) 전송한다."""
+        msg = can.Message(arbitration_id=self.req_id, data=data8, is_extended_id=False)
+        if self.arbiter is not None:
+            self.arbiter.transmit(msg)
+            return
+        # virtual_ecu.VirtualECU._send_raw와 동일하게, 500kbps 기준 프레임 전송시간을
+        # 직접 반영한 뒤(virtual 버스는 이 시간을 흉내내지 않으므로) 전송한다.
         precise_wait(frame_tx_time(len(data8), self.bitrate))
-        self.bus.send(can.Message(arbitration_id=self.req_id, data=data8, is_extended_id=False))
+        self.bus.send(msg)
 
     def _send_flow_control(self):
         self._send([0x30, 0x00, 0x00, 0, 0, 0, 0, 0])
@@ -234,12 +242,20 @@ def build_request_plan(n):
 
 def run_scenario(name, fault_overrides):
     channel = f"vcan_{name}"
-    ecu = VirtualECU(channel=channel, bustype="virtual", fault_injection=fault_overrides, verbose=False)
+    # 이 시나리오의 버스를 하나 만든다 - 진단 클라이언트/ECU/배경 트래픽 노드들이
+    # 전부 이 arbiter를 통해서만 실제로 프레임을 내보내고, ID 우선순위로 경쟁한다.
+    arbiter = ArbitratedBus(channel=channel)
+    bg_nodes = start_background_traffic(arbiter)
+
+    ecu = VirtualECU(
+        channel=channel, bustype="virtual", fault_injection=fault_overrides,
+        verbose=False, arbiter=arbiter,
+    )
     ecu.start()
     time.sleep(0.3)  # ECU가 버스를 먼저 열 시간을 줌 (run_with_virtual_ecu.py와 동일한 패턴)
 
     bus = can.interface.Bus(channel=channel, interface="virtual")
-    client = UdsClient(bus, req_id=REQ_ID, res_id=RES_ID)
+    client = UdsClient(bus, req_id=REQ_ID, res_id=RES_ID, arbiter=arbiter)
     events = []
     try:
         for kind, arg in build_request_plan(REQUESTS_PER_SCENARIO):
@@ -250,9 +266,12 @@ def run_scenario(name, fault_overrides):
             elif kind == "clear_dtc":
                 events.append(client.clear_dtc())
     finally:
+        for node in bg_nodes:
+            node.stop()
         bus.shutdown()
         ecu.stop()
         ecu.join(timeout=2.0)
+        arbiter.stop()
 
     return events
 

@@ -76,7 +76,7 @@ DEFAULT_FAULT_INJECTION = {
 class VirtualECU(threading.Thread):
     def __init__(self, channel="vcan_test", bustype="virtual",
                  req_id=0x7E0, res_id=0x7E8, fault_injection=None, verbose=True,
-                 bitrate=CAN_BITRATE):
+                 bitrate=CAN_BITRATE, arbiter=None):
         super().__init__(daemon=True)
         self.channel = channel
         self.bustype = bustype
@@ -84,6 +84,10 @@ class VirtualECU(threading.Thread):
         self.res_id = res_id
         self.verbose = verbose
         self.bitrate = bitrate
+        # arbiter가 주어지면 모든 송신을 그걸 통해서만 한다(다른 노드와 실제
+        # ID 우선순위로 경쟁). None이면 예전처럼 자기 bus로 즉시 보낸다 - GUI 등
+        # 기존 1:1 통신 사용처의 동작은 그대로 유지된다.
+        self.arbiter = arbiter
         self._stop_flag = threading.Event()
         self.bus = None
 
@@ -311,11 +315,18 @@ class VirtualECU(threading.Thread):
     # ---------------- 전송 유틸 ----------------
     def _send_raw(self, data8):
         data8 = (list(data8) + [0] * 8)[:8]
-        # virtual 버스는 실제 버스 전송시간을 흉내내지 않으므로, 500kbps 기준 프레임
-        # 전송시간을 직접 반영한다. FF/CF도 전부 이 함수를 거쳐가므로 여기 한 곳만
-        # 고치면 ECU가 보내는 모든 프레임(SF 응답, 부정응답, FlowControl, FF, CF)에 적용된다.
+        msg = can.Message(arbitration_id=self.res_id, data=data8, is_extended_id=False)
+        if self.arbiter is not None:
+            # arbiter가 있으면 프레임 전송시간 + 다른 노드와의 ID 우선순위 경쟁까지
+            # 그 안에서 전부 처리된다(이 함수에서 따로 대기할 필요 없음).
+            self.arbiter.transmit(msg)
+            return
+        # arbiter 없이 단독으로 쓰는 경우(GUI 등 1:1 통신): virtual 버스는 실제 버스
+        # 전송시간을 흉내내지 않으므로 500kbps 기준 프레임 전송시간을 직접 반영한다.
+        # FF/CF도 전부 이 함수를 거쳐가므로 여기 한 곳만 고치면 ECU가 보내는 모든
+        # 프레임(SF 응답, 부정응답, FlowControl, FF, CF)에 적용된다.
         precise_wait(frame_tx_time(len(data8), self.bitrate))
-        self.bus.send(can.Message(arbitration_id=self.res_id, data=data8, is_extended_id=False))
+        self.bus.send(msg)
 
     def _send_negative(self, req_sid, nrc):
         self._send_raw([0x03, 0x7F, req_sid, nrc, 0, 0, 0, 0])
