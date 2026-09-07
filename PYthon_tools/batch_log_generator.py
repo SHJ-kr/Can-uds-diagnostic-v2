@@ -24,7 +24,7 @@ from pathlib import Path
 import can
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from virtual_ecu import VirtualECU  # noqa: E402
+from virtual_ecu import VirtualECU, CAN_BITRATE, frame_tx_time, precise_wait  # noqa: E402
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 CSV_PATH = LOGS_DIR / "real_diagnostic_log.csv"
@@ -73,14 +73,20 @@ class UdsClient:
 
     N_CR_TIMEOUT = 1.0
 
-    def __init__(self, bus, req_id=REQ_ID, res_id=RES_ID):
+    def __init__(self, bus, req_id=REQ_ID, res_id=RES_ID, bitrate=CAN_BITRATE):
         self.bus = bus
         self.req_id = req_id
         self.res_id = res_id
+        self.bitrate = bitrate
+
+    def _send(self, data8):
+        """virtual_ecu.VirtualECU._send_raw와 동일하게, 500kbps 기준 프레임 전송시간을
+        직접 반영한 뒤(virtual 버스는 이 시간을 흉내내지 않으므로) 전송한다."""
+        precise_wait(frame_tx_time(len(data8), self.bitrate))
+        self.bus.send(can.Message(arbitration_id=self.req_id, data=data8, is_extended_id=False))
 
     def _send_flow_control(self):
-        fc = can.Message(arbitration_id=self.req_id, data=[0x30, 0x00, 0x00, 0, 0, 0, 0, 0], is_extended_id=False)
-        self.bus.send(fc)
+        self._send([0x30, 0x00, 0x00, 0, 0, 0, 0, 0])
 
     def recv_all(self, timeout):
         """(frames, status) 반환. status: "OK" / "N_CR_TIMEOUT" / "NO_RESPONSE"."""
@@ -187,7 +193,7 @@ class UdsClient:
     def read_by_did(self, did):
         did_h, did_l = (did >> 8) & 0xFF, did & 0xFF
         tx = [0x03, 0x22, did_h, did_l, 0, 0, 0, 0]
-        self.bus.send(can.Message(arbitration_id=self.req_id, data=tx, is_extended_id=False))
+        self._send(tx)
         t0 = time.time()
         frames, status = self.recv_all(timeout=3.0)
         rt_ms = (time.time() - t0) * 1000
@@ -197,7 +203,7 @@ class UdsClient:
 
     def read_dtc(self):
         tx = [0x03, 0x19, 0x02, 0xFF, 0, 0, 0, 0]
-        self.bus.send(can.Message(arbitration_id=self.req_id, data=tx, is_extended_id=False))
+        self._send(tx)
         t0 = time.time()
         frames, status = self.recv_all(timeout=3.0)
         rt_ms = (time.time() - t0) * 1000
@@ -207,7 +213,7 @@ class UdsClient:
 
     def clear_dtc(self):
         tx = [0x02, 0x14, 0xFF, 0, 0, 0, 0, 0]
-        self.bus.send(can.Message(arbitration_id=self.req_id, data=tx, is_extended_id=False))
+        self._send(tx)
         t0 = time.time()
         frames, status = self.recv_all(timeout=2.0)
         rt_ms = (time.time() - t0) * 1000

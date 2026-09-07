@@ -25,6 +25,37 @@ import random
 import struct
 
 
+CAN_BITRATE = 500_000  # bps - 이 프로젝트가 쓰는 CAN 버스 속도(500kbps, ISO 11898 클래식 CAN)
+_FRAME_OVERHEAD_BITS = 47  # SOF1+ID11+RTR1+IDE1+r0 1+DLC4+CRC15+CRCdelim1+ACKslot1+ACKdelim1+EOF7+IFS3
+_BIT_STUFFING_FACTOR = 1.2  # 5비트 연속 시 스터프비트 1개가 끼어드는 것의 최악의 경우 근사치
+
+
+def frame_tx_time(data_len=8, bitrate=CAN_BITRATE):
+    """표준(11비트 ID) CAN 프레임 하나(데이터 data_len바이트)를 bitrate로 실제 전선에
+    실어보내는 데 걸리는 대략적인 시간(초). virtual 버스는 이 시간을 전혀 흉내내지
+    않고 메시지를 사실상 즉시 전달하므로, 각 프레임 전송 지점에서 이 시간만큼 직접
+    대기해서 500kbps 버스의 실제 전송 지연을 반영한다."""
+    raw_bits = _FRAME_OVERHEAD_BITS + 8 * data_len
+    return (raw_bits * _BIT_STUFFING_FACTOR) / bitrate
+
+
+def precise_wait(seconds):
+    """CAN 프레임 전송시간(수백 마이크로초)이나 STmin 프레임 간격처럼 짧은 지연은
+    time.sleep()에 맡기면 안 된다 - Windows 기본 타이머 해상도가 보통 ~15.6ms라서,
+    266us를 요청해도 실제로는 15ms 넘게 밀려버린다(측정으로 확인됨). response_time_ms를
+    가짜로 보정하지 않고 진짜로 그만큼만 기다리기 위해, 대부분은 time.sleep()으로
+    싸게 흘려보내고 마지막 몇 ms만 바쁜 대기(busy-wait)로 정확히 채운다(오래 걸릴
+    수도 있는 지연을 통째로 스핀 대기하면 CPU만 낭비하므로)."""
+    if seconds <= 0:
+        return
+    end = time.perf_counter() + seconds
+    coarse = seconds - 0.003  # 마지막 3ms만 스핀 대기로 정밀하게 맞춤
+    if coarse > 0:
+        time.sleep(coarse)
+    while time.perf_counter() < end:
+        pass
+
+
 DEFAULT_ECU_INFO = {
     "vin": "MY_TC375_VIN_001",
     "hw": "TC375_HW_V1.0.0",
@@ -44,13 +75,15 @@ DEFAULT_FAULT_INJECTION = {
 
 class VirtualECU(threading.Thread):
     def __init__(self, channel="vcan_test", bustype="virtual",
-                 req_id=0x7E0, res_id=0x7E8, fault_injection=None, verbose=True):
+                 req_id=0x7E0, res_id=0x7E8, fault_injection=None, verbose=True,
+                 bitrate=CAN_BITRATE):
         super().__init__(daemon=True)
         self.channel = channel
         self.bustype = bustype
         self.req_id = req_id
         self.res_id = res_id
         self.verbose = verbose
+        self.bitrate = bitrate
         self._stop_flag = threading.Event()
         self.bus = None
 
@@ -278,6 +311,10 @@ class VirtualECU(threading.Thread):
     # ---------------- 전송 유틸 ----------------
     def _send_raw(self, data8):
         data8 = (list(data8) + [0] * 8)[:8]
+        # virtual 버스는 실제 버스 전송시간을 흉내내지 않으므로, 500kbps 기준 프레임
+        # 전송시간을 직접 반영한다. FF/CF도 전부 이 함수를 거쳐가므로 여기 한 곳만
+        # 고치면 ECU가 보내는 모든 프레임(SF 응답, 부정응답, FlowControl, FF, CF)에 적용된다.
+        precise_wait(frame_tx_time(len(data8), self.bitrate))
         self.bus.send(can.Message(arbitration_id=self.res_id, data=data8, is_extended_id=False))
 
     def _send_negative(self, req_sid, nrc):
@@ -323,7 +360,7 @@ class VirtualECU(threading.Thread):
             sent += len(chunk)
             sn = (sn + 1) % 16
             blk += 1
-            time.sleep(gap_sec if gap_sec > 0 else 0.001)
+            precise_wait(gap_sec if gap_sec > 0 else 0.001)
 
             # [신규] Block Size(BS)만큼 보냈으면 다음 블록 전 다시 FC를 기다림 (표준 동작)
             if bs and blk >= bs and sent < length:
