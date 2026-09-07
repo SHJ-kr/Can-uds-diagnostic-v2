@@ -58,6 +58,8 @@ jobs:
             --suppress=unmatchedSuppression \
             --suppress=unusedFunction \
             -I include $FILES 2> cppcheck_report.xml
+          # 이슈가 몇 건이든 이 job은 참고용이라 항상 성공 처리한다 (cppcheck 자체 동작에 암묵적으로 기대지 않음)
+          exit 0
       - name: 결과 요약 (실패시키지 않음, 참고용)
         if: always()
         run: |
@@ -69,6 +71,7 @@ jobs:
               echo "- ${severity}: ${count}" >> $GITHUB_STEP_SUMMARY
             done || true
           fi
+          exit 0
       - name: 결과 업로드
         if: always()
         uses: actions/upload-artifact@v4
