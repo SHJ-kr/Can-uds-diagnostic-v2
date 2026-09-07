@@ -1,0 +1,5 @@
+python-can
+PyQt5
+pandas
+scikit-learn
+matplotlib
