@@ -29,10 +29,16 @@ if [ ! -f "$MISRA_ADDON" ]; then
     exit 0
 fi
 
+# 규칙 번호 설명 텍스트 (사내 라이선스 하에 MISRA-C:2012 부록 A를 옮겨둔 파일).
+# 없어도 검사는 되지만, 있으면 위반 메시지에 규칙 설명이 같이 붙는다.
+RULE_TEXTS="cppcheck_config/misra_rule_texts.txt"
+MISRA_ARGS=()
+[ -f "$RULE_TEXTS" ] && MISRA_ARGS+=("--rule-texts=$RULE_TEXTS")
+
 TMPOUT=$(mktemp)
 "$CPPCHECK_BIN" --dump -I include $STAGED_C >/dev/null 2>&1
 for f in $STAGED_C; do
-    [ -f "$f.dump" ] && python "$MISRA_ADDON" --cli "$f.dump" 2>/dev/null
+    [ -f "$f.dump" ] && python "$MISRA_ADDON" "${MISRA_ARGS[@]}" --cli "$f.dump" 2>/dev/null
     rm -f "$f.dump"  # 임시 dump 파일 정리
 done > "$TMPOUT"
 
