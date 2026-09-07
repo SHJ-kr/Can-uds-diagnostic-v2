@@ -240,12 +240,17 @@ def build_request_plan(n):
     return plan
 
 
-def run_scenario(name, fault_overrides):
+def run_scenario(name, fault_overrides, background_presets=None):
+    """background_presets: [(이름, arbitration_id, (주기최소초, 주기최대초)), ...].
+    None이면 can_bus_arbiter.DEFAULT_BACKGROUND_NODES를 그대로 쓴다(기존 동작)."""
     channel = f"vcan_{name}"
     # 이 시나리오의 버스를 하나 만든다 - 진단 클라이언트/ECU/배경 트래픽 노드들이
     # 전부 이 arbiter를 통해서만 실제로 프레임을 내보내고, ID 우선순위로 경쟁한다.
     arbiter = ArbitratedBus(channel=channel)
-    bg_nodes = start_background_traffic(arbiter)
+    if background_presets is not None:
+        bg_nodes = start_background_traffic(arbiter, presets=background_presets)
+    else:
+        bg_nodes = start_background_traffic(arbiter)
 
     ecu = VirtualECU(
         channel=channel, bustype="virtual", fault_injection=fault_overrides,
@@ -285,24 +290,33 @@ def append_events_to_csv(path, events, write_header):
         writer.writerows(events)
 
 
-def main():
+def main(background_presets=None, progress_callback=None):
+    """background_presets를 넘기면 그 배경 ECU 구성으로 전체 시나리오를 돌린다
+    (sim_config_gui.py처럼 외부에서 호출할 때 사용). progress_callback(str)이 있으면
+    print()로 나가는 진행 메시지를 그 콜백에도 그대로 전달한다(GUI 로그창 갱신용)."""
+    def emit(msg):
+        print(msg)
+        if progress_callback:
+            progress_callback(msg)
+
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     all_events = []
 
     for i, (name, overrides) in enumerate(SCENARIOS):
-        print(f"=== 시나리오 실행: {name} (fault_injection={overrides or '기본값(전부 0)'}) ===")
-        events = run_scenario(name, overrides)
+        emit(f"=== 시나리오 실행: {name} (fault_injection={overrides or '기본값(전부 0)'}) ===")
+        events = run_scenario(name, overrides, background_presets=background_presets)
         append_events_to_csv(CSV_PATH, events, write_header=(i == 0))
         all_events.extend(events)
         counts = dict(Counter(e["event_type"] for e in events))
-        print(f"[{name}] {len(events)}건 완료 - {counts}")
+        emit(f"[{name}] {len(events)}건 완료 - {counts}")
 
-    print("\n=== 전체 요약 ===")
+    emit("\n=== 전체 요약 ===")
     total_counts = Counter(e["event_type"] for e in all_events)
     for event_type, count in total_counts.items():
-        print(f"  {event_type}: {count}")
-    print(f"  총 요청 수: {len(all_events)}")
-    print(f"\nCSV 저장 위치: {CSV_PATH}")
+        emit(f"  {event_type}: {count}")
+    emit(f"  총 요청 수: {len(all_events)}")
+    emit(f"\nCSV 저장 위치: {CSV_PATH}")
+    return all_events
 
 
 if __name__ == "__main__":
