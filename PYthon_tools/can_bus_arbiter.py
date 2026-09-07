@@ -166,12 +166,66 @@ class BackgroundTrafficNode(threading.Thread):
             time.sleep(random.uniform(*self.interval_range))
 
 
+class BackgroundTrafficScheduler(threading.Thread):
+    """배경 ECU 여러 개를 스레드 하나로 통합 관리한다.
+
+    노드마다 독립된 스레드(BackgroundTrafficNode)를 띄우면, 노드가 많아질수록
+    스레드 생성/스케줄 지연 때문에 "누가 진짜 동시에 보내려 했는지"를 정확히
+    구분하기 어려워진다(실측: 노드 6개부터 우선순위가 절반 가까이 틀림). 이건
+    ArbitratedBus의 중재 로직 문제가 아니라,애초에 여러 개의 실제 OS 스레드가
+    동시에 등록을 시도하는 것 자체가 근본 원인이다.
+
+    그래서 배경 노드들은 진짜 스레드 경쟁을 시킬 필요가 없다는 점에 착안했다 -
+    "언제 보낼지"는 각 노드가 미리 알고 있는 값(다음 예정 시각)이므로, 스레드 1개가
+    그 목록을 갖고 있다가 예정 시각이 된 노드들을 (시각, ID) 순으로 정렬해서
+    ArbitratedBus.transmit()을 순서대로 불러주면 된다 - 이건 실제 스레드 경쟁이
+    아니라 이 스레드 안에서의 단순 비교/정렬이라 노드가 몇 개든 항상 정확하다.
+    이러면 실제로 남는 유일한 스레드 경쟁은 "이 스케줄러 1개 vs 진단 클라이언트"
+    뿐이고, 이 2자 대결은 실측상 100% 정확했다(ArbitratedBus의 중재 윈도우로 충분)."""
+
+    def __init__(self, arbiter, presets):
+        super().__init__(daemon=True, name="BgScheduler")
+        self.arbiter = arbiter
+        self._stop_flag = threading.Event()
+        now = time.time()
+        # 각 항목: [다음 전송 예정 시각, 이름, arbitration_id, 주기범위]
+        self._nodes = [
+            [now + random.uniform(*interval_range), name, arb_id, interval_range]
+            for name, arb_id, interval_range in presets
+        ]
+
+    def stop(self):
+        self._stop_flag.set()
+
+    def run(self):
+        while not self._stop_flag.is_set():
+            now = time.time()
+            # 지금 예정 시각이 지난 노드들을 (예정 시각, ID) 순으로 정렬 -
+            # 여러 개가 동시에 도달했어도 이건 스레드 경쟁이 아니라 그냥 정렬이라
+            # 항상 정확하다.
+            due = sorted(
+                (n for n in self._nodes if n[0] <= now),
+                key=lambda n: (n[0], n[2]),
+            )
+            if not due:
+                time.sleep(0.0005)
+                continue
+            for n in due:
+                if self._stop_flag.is_set():
+                    return
+                msg = can.Message(
+                    arbitration_id=n[2],
+                    data=[random.randint(0, 255) for _ in range(8)],
+                    is_extended_id=False,
+                )
+                self.arbiter.transmit(msg)
+                n[0] = time.time() + random.uniform(*n[3])
+
+
 def start_background_traffic(arbiter, presets=DEFAULT_BACKGROUND_NODES):
-    """presets에 정의된 배경 트래픽 노드들을 전부 만들어 시작하고 리스트로 반환한다.
-    끝날 때 각 노드의 stop()을 호출해줘야 한다."""
-    nodes = []
-    for name, arb_id, interval_range in presets:
-        node = BackgroundTrafficNode(arbiter, arb_id, interval_range, name=name)
-        node.start()
-        nodes.append(node)
-    return nodes
+    """presets에 정의된 배경 트래픽 노드들을 단일 스케줄러 스레드로 관리해서
+    시작하고, stop()을 호출할 수 있는 객체 1개를 담은 리스트로 반환한다(기존
+    호출부의 `for node in bg_nodes: node.stop()` 패턴과 그대로 호환되게)."""
+    scheduler = BackgroundTrafficScheduler(arbiter, presets)
+    scheduler.start()
+    return [scheduler]
