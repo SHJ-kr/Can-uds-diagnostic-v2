@@ -1,0 +1,27 @@
+# 임베디드 C 프로젝트용 clang-format 설정
+# 참고: https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+Language: Cpp
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# 중괄호를 새 줄에 (기존 can.c 스타일과 유사하게 Allman 계열)
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeElse: true
+  BeforeWhile: true
+
+PointerAlignment: Right      # unsigned char *data (포인터가 변수 쪽에 붙음)
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+SpaceBeforeParens: ControlStatements
+IndentCaseLabels: true
+SortIncludes: false          # 임베디드는 헤더 include 순서가 중요한 경우가 많아 정렬 비활성화
