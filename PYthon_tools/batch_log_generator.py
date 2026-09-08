@@ -29,7 +29,11 @@ from can_bus_arbiter import ArbitratedBus, start_background_traffic  # noqa: E40
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 CSV_PATH = LOGS_DIR / "real_diagnostic_log.csv"
-FIELDNAMES = ["timestamp", "req_sid", "did", "event_type", "code", "response_time_ms"]
+# scenario는 canuds_gui.py의 원래 스키마엔 없던 컬럼이다. 클러스터링 입력 피처로는
+# 절대 쓰지 않고(nrc_clustering.py의 build_pipeline 참고), 클러스터링이 끝난 뒤에만
+# "진짜 어느 결함 시나리오에서 나온 건지" 사후 대조하는 용도로만 쓴다 - 클러스터링에게
+# 정답을 미리 알려주면 검증 자체가 무의미해지기 때문에 반드시 이 용도로만 한정한다.
+FIELDNAMES = ["timestamp", "req_sid", "did", "event_type", "code", "response_time_ms", "scenario", "result_char"]
 
 REQ_ID = 0x7E0
 RES_ID = 0x7E8
@@ -56,8 +60,15 @@ SCENARIOS = [
 ]
 
 
-def record_event(req_sid, did, event_type, code=None, response_time_ms=None):
-    """canuds_gui.py의 _record_diagnostic_event와 동일한 스키마(quirk 포함)로 이벤트 dict 생성."""
+def record_event(req_sid, did, event_type, code=None, response_time_ms=None, result_char=None):
+    """canuds_gui.py의 _record_diagnostic_event와 동일한 스키마(quirk 포함)로 이벤트 dict 생성.
+
+    result_char: 센서 읽기(DID 0x0001~0x0004) 응답 페이로드에 실려오는 P(정상)/F(임계값
+    초과) 문자. out_of_range_prob 결함은 event_type/req_sid/response_time_ms만 봐서는
+    baseline과 전혀 구분이 안 된다는 게 클러스터링 사후 검증(ARI≈0.075)으로 확인됐다 -
+    ECU가 여전히 정상(POS) 응답을 보내고, 다만 페이로드 안의 이 한 글자만 'F'로 바뀌는
+    결함이기 때문. 그 신호를 실제로 뽑아서 저장해야 클러스터링이 이걸 구분할 기회라도
+    생긴다."""
     return {
         "timestamp": time.time(),
         "req_sid": f"0x{req_sid:02X}" if req_sid is not None else "",
@@ -65,6 +76,7 @@ def record_event(req_sid, did, event_type, code=None, response_time_ms=None):
         "event_type": event_type,
         "code": (f"0x{code:02X}" if isinstance(code, int) else (code or "")),
         "response_time_ms": round(response_time_ms, 1) if response_time_ms is not None else "",
+        "result_char": result_char or "",
     }
 
 
@@ -196,7 +208,14 @@ class UdsClient:
         if uds_sid != pos_sid:
             return record_event(req_sid, did, "UNEXPECTED_SID", uds_sid, response_time_ms)
 
-        return record_event(req_sid, did, "POS", pos_sid, response_time_ms)
+        result_char = None
+        # 센서 읽기(0x22, DID 0x0001~0x0004) 응답은 [pos_sid, did_h, did_l, val_h, val_l,
+        # result_char] 6바이트 - virtual_ecu.py의 _handle_22가 만드는 형식과 동일하게 파싱.
+        if req_sid == 0x22 and did in (0x0001, 0x0002, 0x0003, 0x0004) and len(payload) >= 6:
+            c = payload[5]
+            if 32 <= c <= 126:
+                result_char = chr(c)
+        return record_event(req_sid, did, "POS", pos_sid, response_time_ms, result_char=result_char)
 
     def read_by_did(self, did):
         did_h, did_l = (did >> 8) & 0xFF, did & 0xFF
@@ -305,6 +324,8 @@ def main(background_presets=None, progress_callback=None):
     for i, (name, overrides) in enumerate(SCENARIOS):
         emit(f"=== 시나리오 실행: {name} (fault_injection={overrides or '기본값(전부 0)'}) ===")
         events = run_scenario(name, overrides, background_presets=background_presets)
+        for e in events:
+            e["scenario"] = name  # 사후 검증 전용 - 클러스터링 피처로는 쓰지 않음
         append_events_to_csv(CSV_PATH, events, write_header=(i == 0))
         all_events.extend(events)
         counts = dict(Counter(e["event_type"] for e in events))

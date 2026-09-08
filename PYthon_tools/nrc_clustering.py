@@ -22,6 +22,7 @@ import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
+from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -34,7 +35,16 @@ K_RANGE = range(1, 11)
 def load_data():
     if not CSV_PATH.exists():
         sys.exit(f"진단 로그가 없습니다: {CSV_PATH}\n먼저 batch_log_generator.py를 실행하세요.")
-    return pd.read_csv(CSV_PATH)
+    df = pd.read_csv(CSV_PATH)
+    if "result_char" in df.columns:
+        # 센서 읽기가 아닌 행(ClearDTC, ReadDTC, ECU Info, NRC 등)은 result_char가
+        # 빈 칸이라 pandas가 NaN으로 읽는다. response_time_ms와 달리 이 값은 "측정된 적
+        # 없는 숫자"가 아니라 "애초에 해당 없음"이라 결측치 자체가 정보이므로, 행을
+        # 버리는 대신 "N/A"라는 명시적 카테고리로 채운다(OneHotEncoder는 NaN을 못 받음).
+        df["result_char"] = df["result_char"].fillna("N/A")
+    else:
+        df["result_char"] = "N/A"
+    return df
 
 
 def drop_unmeasured_rows(df):
@@ -55,10 +65,16 @@ def build_pipeline():
     # code 컬럼은 의도적으로 제외한다: NRC 이벤트의 code는 사실상 event_type="NRC"의
     # 세부값이라 event_type과 의미가 겹친다. 둘 다 넣으면 같은 신호("이 요청이 실패했다")를
     # 두 번 반영하게 되어 거리 계산이 왜곡될 수 있다. event_type만으로 그 신호를 대표시킨다.
+    #
+    # result_char("P"/"F"/"")는 반대로 반드시 넣어야 한다 - 사후 검증(ARI≈0.075)으로
+    # 확인된 것처럼, out_of_range 결함은 event_type/req_sid/response_time_ms만 봐서는
+    # baseline과 전혀 구분되지 않는다(ECU가 여전히 POS를 보내고, 페이로드 안의 이 한
+    # 글자만 F로 바뀌기 때문). 이 신호를 피처에 안 넣으면 클러스터링이 애초에 구분할
+    # 방법이 없다.
     return ColumnTransformer(
         transformers=[
             ("response_time", StandardScaler(), ["response_time_ms"]),
-            ("categorical", OneHotEncoder(handle_unknown="ignore"), ["req_sid", "event_type"]),
+            ("categorical", OneHotEncoder(handle_unknown="ignore"), ["req_sid", "event_type", "result_char"]),
         ]
     )
 
@@ -98,6 +114,41 @@ def summarize_clusters(df, labels):
         print(sub["event_type"].value_counts(normalize=True).mul(100).round(1).to_string())
         print("  req_sid 분포 (%):")
         print(sub["req_sid"].value_counts(normalize=True).mul(100).round(1).to_string())
+        print("  result_char 분포 (%) [N/A=센서 읽기가 아닌 행]:")
+        print(sub["result_char"].value_counts(normalize=True).mul(100).round(1).to_string())
+
+
+def validate_against_scenario(df, labels):
+    """클러스터링에 절대 입력되지 않았던 "진짜 정답"(어느 결함 시나리오에서 나온
+    행인지)과 클러스터 결과를 사후 대조한다. 지금까지는 "클러스터가 그럴듯해 보인다"는
+    눈대중 해석뿐이었는데, 이 함수가 그걸 실제 숫자로 검증한다.
+
+    구 버전 CSV(batch_log_generator.py가 scenario 컬럼을 추가하기 전에 생성한 로그)에는
+    이 컬럼이 없을 수 있으므로, 없으면 검증을 건너뛰고 그 사실을 알린다.
+    """
+    if "scenario" not in df.columns:
+        print("\n[검증 건너뜀] 이 CSV에는 'scenario'(정답) 컬럼이 없습니다 - "
+              "batch_log_generator.py를 다시 실행해서 최신 스키마로 로그를 새로 만드세요.")
+        return
+
+    df = df.copy()
+    df["cluster"] = labels
+
+    print("\n=== 클러스터 vs 실제 결함 시나리오 대조 (정답은 클러스터링에 안 들어갔음) ===")
+    print("클러스터별 시나리오 구성 (%, 행 기준):")
+    cluster_vs_scenario = pd.crosstab(df["cluster"], df["scenario"], normalize="index").mul(100).round(1)
+    print(cluster_vs_scenario.to_string())
+
+    print("\n시나리오별 클러스터 분포 (%, 행 기준):")
+    scenario_vs_cluster = pd.crosstab(df["scenario"], df["cluster"], normalize="index").mul(100).round(1)
+    print(scenario_vs_cluster.to_string())
+
+    ari = adjusted_rand_score(df["scenario"], df["cluster"])
+    print(f"\nAdjusted Rand Index (클러스터 vs 실제 시나리오 일치도): {ari:.3f}")
+    print("  1.0에 가까울수록 클러스터가 실제 결함 시나리오 구조를 정확히 재현했다는 뜻,")
+    print("  0에 가까우면 사실상 무작위로 나눈 것과 다를 바 없다는 뜻.")
+    print("  (참고: 클러스터 개수(K)와 시나리오 개수가 달라도 계산되는 지표라서, K=4와")
+    print("   시나리오 6개가 안 맞는 것 자체는 낮은 점수의 직접적 원인이 아니다.)")
 
 
 def plot_scatter(coords, labels, path, explained_variance):
@@ -151,6 +202,7 @@ def main():
     model = KMeans(n_clusters=args.k, n_init=10, random_state=42)
     labels = model.fit_predict(X)
     summarize_clusters(df_clustered, labels)
+    validate_against_scenario(df_clustered, labels)
 
     X_dense = X.toarray() if hasattr(X, "toarray") else X
     pca = PCA(n_components=2, random_state=42)
