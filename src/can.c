@@ -63,7 +63,7 @@ static void UDS_Handle_19(const unsigned char *uds, int len)
         txBuf[2] = 0x00; // Status mask (no DTC)
         txLen = 3;
 
-        Can_SendMsg(0x7E8, (const char *)txBuf, 8); // 8바이트 맞춰 전송
+        Can_TpSend(0x7E8, txBuf, txLen);
         my_printf("[UDS] No DTCs stored (sending empty DTC response)\n");
         return;
     }
@@ -83,10 +83,7 @@ static void UDS_Handle_19(const unsigned char *uds, int len)
         txBuf[txLen++] = g_dtcList[i].status; // ← ★ 누락된 Status 추가
     }
 
-    if (txLen > 8)
-        Can_TpSend(0x7E8, txBuf, txLen);
-    else
-        Can_SendMsg(0x7E8, (const char *)txBuf, 8);
+    Can_TpSend(0x7E8, txBuf, txLen);
 }
 
 /* FlowControl(0x30) 전송 (표준 준수/안정성용) */
