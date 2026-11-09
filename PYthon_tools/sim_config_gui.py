@@ -158,8 +158,8 @@ class SimConfigGui(QtWidgets.QWidget):
             except ValueError:
                 errors.append(f"{row + 1}행: 주기 값이 숫자가 아닙니다 ('{lo_text}', '{hi_text}').")
                 continue
-            if lo_ms < 0 or hi_ms < lo_ms:
-                errors.append(f"{row + 1}행: 주기 범위가 올바르지 않습니다 (0 <= 최소 <= 최대).")
+            if lo_ms <= 0 or hi_ms < lo_ms:
+                errors.append(f"{row + 1}행: 주기 범위가 올바르지 않습니다 (0 < 최소 <= 최대).")
                 continue
 
             presets.append((name, arb_id, (lo_ms / 1000.0, hi_ms / 1000.0)))
