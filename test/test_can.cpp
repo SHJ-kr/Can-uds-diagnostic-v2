@@ -134,20 +134,43 @@ TEST_F(CanTest, UdsDispatch_ClearDTC_SendsPositiveResponse) {
     EXPECT_EQ(g_fakeCanSentFrames[0].data[1], 0x54) << "0x14 ClearDTC의 Positive Response는 0x54";
 }
 
-// [알려진 버그] UDS_Handle_19의 "DTC 없음"/"소수 DTC" 분기는 ISO-TP SF PCI 바이트
-// (data[0]에 와야 할 길이 헤더)를 안 붙이고 Can_SendMsg를 직접 호출합니다.
-// UDS_Handle_14(ClearDTC)는 {0x02, 0x54, 0xFF, ...}처럼 PCI 바이트(0x02)를 제대로 붙이는데,
-// 여긴 txBuf[0]에 UDS SID(0x59)를 바로 써버려서 클라이언트가 정상 파싱을 못 합니다.
-// 이 테스트는 "이래야 맞다(0x59 앞에 PCI 바이트 0x03이 와야 한다)"는 정답 기준으로 작성되어 있어서,
-// 지금은 실패하는 게 정상입니다 - 버그를 고치면 이 테스트가 통과하게 됩니다.
+// DTC 응답은 길이 헤더, SID, sub-function, status mask 순서로 전송합니다.
 TEST_F(CanTest, UdsDispatch_ReadDTC_NoDtcs_SendsEmptyResponse) {
     unsigned char req[1] = {0x19};
     UDS_Dispatch_CompletedPdu(req, 1);
 
     ASSERT_EQ(g_fakeCanSentCount, 1);
-    EXPECT_EQ(g_fakeCanSentFrames[0].data[0], 0x03) << "SF PCI 바이트(길이=3)가 먼저 와야 함 - 현재 버그로 실패함";
+    EXPECT_EQ(g_fakeCanSentFrames[0].data[0], 0x03) << "SF PCI 바이트(길이=3)가 먼저 와야 함";
     EXPECT_EQ(g_fakeCanSentFrames[0].data[1], 0x59);
-    EXPECT_EQ(g_fakeCanSentFrames[0].data[2], 0x00) << "DTC 없으면 status mask 0x00";
+    EXPECT_EQ(g_fakeCanSentFrames[0].data[2], 0x02);
+    EXPECT_EQ(g_fakeCanSentFrames[0].data[3], 0x00) << "DTC 없으면 status mask 0x00";
+}
+
+TEST_F(CanTest, UdsDispatch_ReadDTC_OneDtc_UsesSevenByteSingleFrame) {
+    DTC_Report(0x010101);
+    unsigned char req[1] = {0x19};
+    UDS_Dispatch_CompletedPdu(req, 1);
+
+    ASSERT_EQ(g_fakeCanSentCount, 1);
+    const unsigned char expected[8] = {0x07, 0x59, 0x02, 0xFF, 0x01, 0x01, 0x01, 0x01};
+    for (int i = 0; i < 8; i++) {
+        EXPECT_EQ(g_fakeCanSentFrames[0].data[i], expected[i]);
+    }
+}
+
+TEST_F(CanTest, UdsDispatch_ReadDTC_TwoDtcs_UsesMultiFrame) {
+    DTC_Report(0x010101);
+    DTC_Report(0x010111);
+    unsigned char req[1] = {0x19};
+    UDS_Dispatch_CompletedPdu(req, 1);
+
+    ASSERT_EQ(g_fakeCanSentCount, 2);
+    const unsigned char first[8] = {0x10, 0x0B, 0x59, 0x02, 0xFF, 0x01, 0x01, 0x01};
+    const unsigned char consecutive[8] = {0x21, 0x01, 0x01, 0x01, 0x11, 0x01, 0, 0};
+    for (int i = 0; i < 8; i++) {
+        EXPECT_EQ(g_fakeCanSentFrames[0].data[i], first[i]);
+        EXPECT_EQ(g_fakeCanSentFrames[1].data[i], consecutive[i]);
+    }
 }
 
 TEST_F(CanTest, UdsDispatch_Write0005_CorrectLength_SendsAck) {

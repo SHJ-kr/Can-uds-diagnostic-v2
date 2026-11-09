@@ -3,6 +3,7 @@
 -----------------------------------------------------
 실물 CAN 버스/TC375 보드가 없을 때, python-can의 virtual 인터페이스로
 canuds_gui.py를 실제로 테스트할 수 있게 해주는 SIL(Software-in-the-Loop) ECU 시뮬레이터.
+부하 실험에서는 sensor_values로 고정 센서값을 지정해 통신 부하와 센서 난수를 분리한다.
 
 주의(python-can virtual 버스의 제약):
   virtual 버스는 "같은 프로세스" 안에서 채널명이 같은 Bus 인스턴스끼리만 통신됨.
@@ -76,7 +77,7 @@ DEFAULT_FAULT_INJECTION = {
 class VirtualECU(threading.Thread):
     def __init__(self, channel="vcan_test", bustype="virtual",
                  req_id=0x7E0, res_id=0x7E8, fault_injection=None, verbose=True,
-                 bitrate=CAN_BITRATE, arbiter=None):
+                 bitrate=CAN_BITRATE, arbiter=None, sensor_values=None):
         super().__init__(daemon=True)
         self.channel = channel
         self.bustype = bustype
@@ -89,6 +90,9 @@ class VirtualECU(threading.Thread):
         # 기존 1:1 통신 사용처의 동작은 그대로 유지된다.
         self.arbiter = arbiter
         self._stop_flag = threading.Event()
+        self.ready = threading.Event()
+        self.startup_error = None
+        self.sensor_values = dict(sensor_values or {})
         self.bus = None
 
         self.ecu_info = dict(DEFAULT_ECU_INFO)
@@ -113,7 +117,13 @@ class VirtualECU(threading.Thread):
         self._stop_flag.set()
 
     def run(self):
-        self.bus = can.interface.Bus(channel=self.channel, interface=self.bustype)
+        try:
+            self.bus = can.interface.Bus(channel=self.channel, interface=self.bustype)
+        except Exception as exc:
+            self.startup_error = exc
+            self.ready.set()
+            return
+        self.ready.set()
         self.log(f"시작 (channel={self.channel}, req_id=0x{self.req_id:03X} -> res_id=0x{self.res_id:03X})")
         while not self._stop_flag.is_set():
             try:
@@ -199,13 +209,13 @@ class VirtualECU(threading.Thread):
     def _maybe_delay(self):
         lo, hi = self.fault_injection["response_delay_range"]
         if hi > 0:
-            time.sleep(random.uniform(lo, hi))
+            self._stop_flag.wait(random.uniform(lo, hi))
 
     def _maybe_send_pending(self, requested_sid):
         if random.random() < self.fault_injection["send_pending_prob"]:
             self.log(f"⏳ (고의) NRC 0x78 ResponsePending 먼저 전송 (SID=0x{requested_sid:02X})")
             self._send_negative(requested_sid, 0x78)
-            time.sleep(0.3)
+            self._stop_flag.wait(0.3)
 
     def _report_dtc(self, code):
         entry = self.dtc_list.get(code)
@@ -232,7 +242,7 @@ class VirtualECU(threading.Thread):
                 self._report_dtc(0x010100 + side * 0x10 + 0x0)
                 self._send_negative(0x22, 0x11)  # 실제 펌웨어와 동일한 NRC
                 return
-            val = random.randint(50, 450)
+            val = self.sensor_values[did] if did in self.sensor_values else random.randint(50, 450)
             forced_out = random.random() < self.fault_injection["out_of_range_prob"]
             in_range = self.sensor_thresholds["ultra_min"] <= val <= self.sensor_thresholds["ultra_max"]
             if forced_out or not in_range:
@@ -248,7 +258,7 @@ class VirtualECU(threading.Thread):
                 self._report_dtc(0x010200)
                 self._send_negative(0x22, 0x11)
                 return
-            val = random.randint(100, 5500)
+            val = self.sensor_values[did] if did in self.sensor_values else random.randint(100, 5500)
             forced_out = random.random() < self.fault_injection["out_of_range_prob"]
             in_range = self.sensor_thresholds["tof_min"] <= val <= self.sensor_thresholds["tof_max"]
             if forced_out or not in_range:
@@ -362,6 +372,8 @@ class VirtualECU(threading.Thread):
 
         sent, sn, blk = 6, 1, 0
         while sent < length:
+            if self._stop_flag.is_set():
+                return
             if self.fault_injection["drop_cf_prob"] > 0 and random.random() < self.fault_injection["drop_cf_prob"]:
                 self.log(f"💥 (고의) CF 프레임 드롭 (SN={sn}) → 전송 중단 (N_Cr 타임아웃 유발용)")
                 return
@@ -383,8 +395,8 @@ class VirtualECU(threading.Thread):
 
     def _wait_for_flow_control(self, timeout=2.0):
         """req_id로 들어오는 FlowControl(PCI=0x3) 프레임을 기다린다."""
-        t0 = time.time()
-        while time.time() - t0 < timeout:
+        t0 = time.perf_counter()
+        while not self._stop_flag.is_set() and time.perf_counter() - t0 < timeout:
             msg = self.bus.recv(timeout=0.05)
             if msg and msg.arbitration_id == self.req_id and (msg.data[0] >> 4) == 0x3:
                 return msg.data
