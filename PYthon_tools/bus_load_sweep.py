@@ -1,15 +1,15 @@
-"""
-버스 부하(배경 ECU 개수) 파라미터 스윕
-----------------------------------------
-"클러스터링은 한 번 실행한 결과 안에서 패턴을 찾는 도구일 뿐, 조건을 바꾸면
-결과가 어떻게 달라지는지는 답해주지 못한다"는 한계를 보완하기 위한 스크립트다.
+"""Measure diagnostic latency/deadlines under background traffic, without fault injection.
 
-배경 ECU 개수(=버스 부하 수준)만 다르게 설정해서 각각 독립적으로 시뮬레이션을
-돌리고, 그 결과(평균 응답시간, 이벤트 유형별 비율)를 서로 비교한다. 결함 주입
-(fault_injection)은 전부 꺼서(baseline) 돌린다 - 그래야 관찰되는 지연/오류가
-결함 주입이 아니라 순수하게 버스 부하 때문이라고 말할 수 있다.
+Outputs use a new schema/directory so old POS-only results are not overwritten.
+Bus utilization is modeled frame time divided by observed request-window time;
+it is not a measurement from a physical CAN interface.
 """
+import argparse
 import csv
+import json
+import math
+import platform
+import statistics
 import sys
 from collections import Counter
 from pathlib import Path
@@ -19,86 +19,207 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from batch_log_generator import run_scenario  # noqa: E402
+from batch_log_generator import run_scenario
+from virtual_ecu import CAN_BITRATE, DEFAULT_FAULT_INJECTION, frame_tx_time
 
-LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
-CSV_PATH = LOGS_DIR / "bus_load_sweep.csv"
-PLOT_PATH = LOGS_DIR / "bus_load_sweep.png"
-
-# 배경 ECU 개수별로 비교. ID는 전부 진단 ID(0x7E0/0x7E8)보다 낮게(우선순위 높게),
-# 주기는 10~20ms로 고정해서 "개수"만 변수가 되게 한다.
-LOAD_LEVELS = [0, 2, 4, 6, 8, 10, 15, 20, 30]
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "logs" / "bus_load_v2"
+LOAD_LEVELS = [0, 10, 20, 30, 45, 55]
+FIXED_SENSOR_VALUES = {1: 200, 2: 200, 3: 200, 4: 2000}
 
 
 def make_presets(n):
+    if not 0 <= n <= 110:
+        raise ValueError("background ECU count must be between 0 and 110 (IDs below diagnostic ID)")
     return [(f"bg{i}", 0x100 + i * 0x10, (0.01, 0.02)) for i in range(n)]
 
 
+def percentile(values, q):
+    if not values:
+        return ""
+    values = sorted(values)
+    index = (len(values) - 1) * q
+    lo, hi = math.floor(index), math.ceil(index)
+    return round(values[lo] + (values[hi] - values[lo]) * (index - lo), 3)
+
+
 def summarize(events):
+    if not events:
+        raise ValueError("no diagnostic requests to summarize")
     total = len(events)
     counts = Counter(e["event_type"] for e in events)
-    measured = [e["response_time_ms"] for e in events if e["response_time_ms"] != ""]
-    avg_rt = sum(measured) / len(measured) if measured else 0.0
+    complete = [e for e in events if e["response_complete"]]
+    latencies = [e["response_time_ms"] for e in complete]
+    waits = [e["request_tx_wait_ms"] for e in events if e["request_tx_wait_ms"] != ""]
+    observed = sum(e["observation_s"] for e in events)
+    wire = sum(e["modeled_wire_busy_s"] for e in events)
+    service = sum(e["service_busy_s"] for e in events)
+    releases = sum(e["background_releases"] for e in events)
+    coalesced = sum(e["background_coalesced"] for e in events)
+    rate = lambda count: round(100 * count / total, 2)
     return {
-        "background_ecu_count": None,  # 호출부에서 채움
+        "background_ecu_count": None,
         "total_requests": total,
-        "avg_response_time_ms": round(avg_rt, 2),
-        "pos_rate_pct": round(counts.get("POS", 0) / total * 100, 1),
-        "nrc_rate_pct": round(counts.get("NRC", 0) / total * 100, 1),
-        "incomplete_reassembly_rate_pct": round(counts.get("INCOMPLETE_REASSEMBLY", 0) / total * 100, 1),
-        "n_cr_timeout_rate_pct": round(counts.get("N_CR_TIMEOUT", 0) / total * 100, 1),
-        "no_response_rate_pct": round(counts.get("NO_RESPONSE", 0) / total * 100, 1),
+        "deadline_ms": events[0]["deadline_ms"],
+        "modeled_bus_load_pct": round(100 * wire / observed, 3),
+        "service_overhead_pct": round(100 * (service - wire) / observed, 3),
+        "observation_s": round(observed, 6),
+        "avg_completed_response_ms": round(statistics.mean(latencies), 3) if latencies else "",
+        "p50_completed_response_ms": percentile(latencies, 0.50),
+        "p95_completed_response_ms": percentile(latencies, 0.95),
+        "p99_completed_response_ms": percentile(latencies, 0.99),
+        "max_completed_response_ms": round(max(latencies), 3) if latencies else "",
+        "completed_sample_count": len(complete),
+        "avg_wait_ms_all_requests": round(statistics.mean(e["response_time_ms"] for e in events), 3),
+        "avg_request_tx_wait_ms": round(statistics.mean(waits), 3) if waits else "",
+        "request_tx_wait_sample_count": len(waits),
+        "valid_response_rate_pct": rate(len(complete)),
+        "on_time_completion_rate_pct": rate(sum(e["deadline_met"] for e in events)),
+        "on_time_pos_rate_pct": rate(sum(e["deadline_met"] and e["event_type"] == "POS" for e in events)),
+        "deadline_miss_rate_pct": rate(sum(not e["deadline_met"] for e in events)),
+        "late_complete_rate_pct": rate(sum(e["response_complete"] and not e["deadline_met"] for e in events)),
+        "pos_rate_pct": rate(counts["POS"]),
+        "nrc_rate_pct": rate(counts["NRC"]),
+        "transport_failure_rate_pct": rate(total - len(complete)),
+        "tx_timeout_rate_pct": rate(counts["TX_TIMEOUT"]),
+        "no_response_rate_pct": rate(counts["NO_RESPONSE"]),
+        "n_cr_timeout_rate_pct": rate(counts["N_CR_TIMEOUT"]),
+        "incomplete_reassembly_rate_pct": rate(counts["INCOMPLETE_REASSEMBLY"]),
+        "invalid_response_rate_pct": rate(sum(counts[k] for k in (
+            "INVALID_RESPONSE", "SEQUENCE_ERROR", "RESPONSE_MISMATCH",
+        ))),
+        "ignored_frames": sum(e["ignored_frames"] for e in events),
+        "background_releases": releases,
+        "background_coalesced": coalesced,
+        "background_coalesced_rate_pct": round(100 * coalesced / releases, 3) if releases else 0.0,
     }
 
 
-def main():
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    results = []
+def write_csv(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
 
-    for n in LOAD_LEVELS:
-        print(f"=== 배경 ECU {n}개로 실행 (baseline, 결함 주입 없음) ===")
-        presets = make_presets(n)
-        events = run_scenario(f"busload_{n}", {}, background_presets=presets)
+
+def plot_results(rows, path):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    x = [r["background_ecu_count"] for r in rows]
+    for key, label in (
+        ("avg_completed_response_ms", "Completed response mean"),
+        ("p95_completed_response_ms", "Completed response P95"),
+    ):
+        axes[0].plot(x, [r[key] if r[key] != "" else float("nan") for r in rows], marker="o", label=label)
+    axes[0].axhline(rows[0]["deadline_ms"], linestyle="--", color="gray", label="Configured deadline")
+    for row in rows:
+        if row["completed_sample_count"] == 0:
+            axes[0].annotate("No completed responses", (row["background_ecu_count"], rows[0]["deadline_ms"]),
+                             xytext=(0, 10), textcoords="offset points", ha="center", fontsize=8)
+    axes[0].set_ylabel("End-to-end latency (ms), completed responses only")
+    axes[0].legend()
+    axes[1].plot(x, [r["modeled_bus_load_pct"] for r in rows], marker="o", label="Modeled bus occupancy")
+    axes[1].plot(x, [r["on_time_completion_rate_pct"] for r in rows], marker="s", label="On-time valid completion")
+    axes[1].plot(x, [r["pos_rate_pct"] for r in rows], linestyle=":", label="POS responses (no deadline test)")
+    axes[1].set_ylabel("Percent (%)")
+    axes[1].set_ylim(0, 105)
+    axes[1].legend()
+    for ax in axes:
+        ax.set_xlabel("Background ECU count")
+        ax.set_xticks(x)
+        margin = max(2, (max(x) - min(x)) * 0.15)
+        ax.set_xlim(min(x) - margin, max(x) + margin)
+        ax.grid(alpha=0.25)
+    fig.suptitle("Software CAN timing model — no injected faults; not hardware measurements")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--levels", default=",".join(map(str, LOAD_LEVELS)))
+    parser.add_argument("--requests", type=int, default=200, help="Requests per level per repeat")
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--deadline-ms", type=float, default=100.0, help="Experiment requirement, not a UDS standard value")
+    parser.add_argument("--hard-timeout-ms", type=float, default=1000.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    args = parser.parse_args(argv)
+    try:
+        levels = sorted(set(int(v) for v in args.levels.split(",")))
+        for n in levels:
+            make_presets(n)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not levels or args.requests <= 0 or args.repeats <= 0:
+        parser.error("levels, requests and repeats must be nonempty/positive")
+    if not (0 < args.deadline_ms <= args.hard_timeout_ms):
+        parser.error("require 0 < deadline-ms <= hard-timeout-ms")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    all_events, rows = [], []
+    for n in levels:
+        events = []
+        for repeat in range(args.repeats):
+            print(f"Background ECUs={n}, repeat={repeat + 1}/{args.repeats}, requests={args.requests}", flush=True)
+
+            def progress(index, event):
+                if index % 20 == 0 or index == args.requests:
+                    print(f"  {index}/{args.requests} requests finished", flush=True)
+
+            batch = run_scenario(
+                f"busload_v2_{n}", {}, background_presets=make_presets(n),
+                request_count=args.requests, deadline_ms=args.deadline_ms,
+                hard_timeout=args.hard_timeout_ms / 1000, seed=args.seed + repeat,
+                measure_load=True, sensor_values=FIXED_SENSOR_VALUES,
+                progress_callback=progress,
+            )
+            for event in batch:
+                event.update(background_ecu_count=n, repeat_index=repeat + 1, seed=args.seed + repeat)
+            events.extend(batch)
         row = summarize(events)
         row["background_ecu_count"] = n
-        results.append(row)
-        print(
-            f"  평균응답시간={row['avg_response_time_ms']}ms  "
-            f"POS={row['pos_rate_pct']}%  재조립실패={row['incomplete_reassembly_rate_pct']}%  "
-            f"N_Cr타임아웃={row['n_cr_timeout_rate_pct']}%  무응답={row['no_response_rate_pct']}%"
-        )
-
-    fieldnames = list(results[0].keys())
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
-    print(f"\n결과 CSV 저장: {CSV_PATH}")
-
-    xs = [r["background_ecu_count"] for r in results]
-    avg_rt = [r["avg_response_time_ms"] for r in results]
-    fail_rate = [
-        r["incomplete_reassembly_rate_pct"] + r["n_cr_timeout_rate_pct"] + r["no_response_rate_pct"]
-        for r in results
-    ]
-
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    ax1.plot(xs, avg_rt, marker="o", color="tab:blue", label="Avg response time (ms)")
-    ax1.set_xlabel("Background ECU count (bus load level)")
-    ax1.set_ylabel("Avg response time (ms)", color="tab:blue")
-    ax1.tick_params(axis="y", labelcolor="tab:blue")
-
-    ax2 = ax1.twinx()
-    ax2.plot(xs, fail_rate, marker="s", color="tab:red", label="Failure rate (%)")
-    ax2.set_ylabel("Failure rate (%) [incomplete/timeout/no-response]", color="tab:red")
-    ax2.tick_params(axis="y", labelcolor="tab:red")
-
-    plt.title("Bus Load Sweep: background ECU count vs. response time / failure rate")
-    fig.tight_layout()
-    plt.savefig(PLOT_PATH)
-    plt.close()
-    print(f"그래프 저장: {PLOT_PATH}")
+        row["nominal_offered_background_load_pct"] = round(n * frame_tx_time() / 0.015 * 100, 3)
+        rows.append(row)
+        all_events.extend(events)
+        print(f"  model occupancy={row['modeled_bus_load_pct']}%, "
+              f"completed P95={row['p95_completed_response_ms']} ms, "
+              f"on-time={row['on_time_completion_rate_pct']}%, POS={row['pos_rate_pct']}%", flush=True)
+    baseline = next((r["avg_completed_response_ms"] for r in rows if r["background_ecu_count"] == 0), "")
+    for row in rows:
+        average = row["avg_completed_response_ms"]
+        row["mean_latency_increase_vs_idle_pct"] = round((average / baseline - 1) * 100, 3) \
+            if baseline not in ("", 0) and average != "" else ""
+    write_csv(args.output_dir / "summary.csv", rows)
+    write_csv(args.output_dir / "requests.csv", all_events)
+    metadata = {
+        "schema_version": 2, "python": sys.version, "platform": platform.platform(),
+        "bitrate_bps": CAN_BITRATE, "requests_per_repeat": args.requests,
+        "repeats": args.repeats, "seed": args.seed, "levels": levels,
+        "deadline_ms": args.deadline_ms, "hard_timeout_ms": args.hard_timeout_ms,
+        "fault_injection": DEFAULT_FAULT_INJECTION, "fixed_sensor_values_mm": FIXED_SENSOR_VALUES,
+        "definitions": {
+            "response_time_ms": "perf_counter before request submission through valid completion or failure",
+            "on_time_completion_rate_pct": "complete, matching POS or final NRC within deadline / all requests",
+            "on_time_pos_rate_pct": "matching POS within deadline / all requests",
+            "deadline_miss_rate_pct": "late or failed requests / all requests",
+            "p95_completed_response_ms": "P95 among complete POS/NRC only; failures excluded and reported separately",
+            "modeled_bus_load_pct": "modeled wire time / sum of request observation windows; includes diagnostic frames",
+            "service_overhead_pct": "in-service wall time beyond modeled wire time / observation windows",
+            "background_coalesced": "scheduled background releases replaced while one frame from that source is pending",
+        },
+        "limitations": [
+            "Real-time Python/OS scheduling affects results; fixed seed does not make timing deterministic.",
+            "Hard timeout is a budget checked by software; scheduling can delay timeout detection.",
+            "Wire time uses (47 + 8 * DLC) * 1.2 / bitrate, including IFS; stuffing is approximate.",
+            "No physical error frames, CAN controller retransmission, bus-off or electrical effects are modeled.",
+            "One pending background frame per source; offered load may differ from observed occupancy.",
+            "Warm-up/recovery excluded; transport failures reset the virtual session to isolate late responses.",
+            "These results do not establish physical CAN saturation thresholds or MCU firmware correctness.",
+        ],
+    }
+    (args.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    plot_results(rows, args.output_dir / "bus_load_sweep.png")
+    print(f"Results: {args.output_dir.resolve()}")
+    return rows
 
 
 if __name__ == "__main__":
